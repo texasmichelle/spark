@@ -17,28 +17,47 @@
 
 import atexit
 import os
+import sys
 import select
 import signal
 import shlex
 import socket
 import platform
 from subprocess import Popen, PIPE
-from py4j.java_gateway import java_import, JavaGateway, GatewayClient
 
+if sys.version >= '3':
+    xrange = range
+
+from py4j.java_gateway import java_import, JavaGateway, GatewayClient
+from pyspark.find_spark_home import _find_spark_home
 from pyspark.serializers import read_int
 
 
-def launch_gateway():
+def launch_gateway(conf=None):
+    """
+    launch jvm gateway
+    :param conf: spark configuration passed to spark-submit
+    :return:
+    """
     if "PYSPARK_GATEWAY_PORT" in os.environ:
         gateway_port = int(os.environ["PYSPARK_GATEWAY_PORT"])
     else:
-        SPARK_HOME = os.environ["SPARK_HOME"]
+        SPARK_HOME = _find_spark_home()
         # Launch the Py4j gateway using Spark's run command so that we pick up the
         # proper classpath and settings from spark-env.sh
         on_windows = platform.system() == "Windows"
         script = "./bin/spark-submit.cmd" if on_windows else "./bin/spark-submit"
+        command = [os.path.join(SPARK_HOME, script)]
+        if conf:
+            for k, v in conf.getAll():
+                command += ['--conf', '%s=%s' % (k, v)]
         submit_args = os.environ.get("PYSPARK_SUBMIT_ARGS", "pyspark-shell")
-        command = [os.path.join(SPARK_HOME, script)] + shlex.split(submit_args)
+        if os.environ.get("SPARK_TESTING"):
+            submit_args = ' '.join([
+                "--conf spark.ui.enabled=false",
+                submit_args
+            ])
+        command = command + shlex.split(submit_args)
 
         # Start a socket that will be used by PythonGatewayServer to communicate its port to us
         callback_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -92,12 +111,13 @@ def launch_gateway():
             atexit.register(killChild)
 
     # Connect to the gateway
-    gateway = JavaGateway(GatewayClient(port=gateway_port), auto_convert=False)
+    gateway = JavaGateway(GatewayClient(port=gateway_port), auto_convert=True)
 
     # Import the classes used by PySpark
     java_import(gateway.jvm, "org.apache.spark.SparkConf")
     java_import(gateway.jvm, "org.apache.spark.api.java.*")
     java_import(gateway.jvm, "org.apache.spark.api.python.*")
+    java_import(gateway.jvm, "org.apache.spark.ml.python.*")
     java_import(gateway.jvm, "org.apache.spark.mllib.api.python.*")
     # TODO(davies): move into sql
     java_import(gateway.jvm, "org.apache.spark.sql.*")

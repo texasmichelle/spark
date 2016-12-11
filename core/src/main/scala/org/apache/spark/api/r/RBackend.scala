@@ -18,7 +18,7 @@
 package org.apache.spark.api.r
 
 import java.io.{DataOutputStream, File, FileOutputStream, IOException}
-import java.net.{InetSocketAddress, ServerSocket}
+import java.net.{InetAddress, InetSocketAddress, ServerSocket}
 import java.util.concurrent.TimeUnit
 
 import io.netty.bootstrap.ServerBootstrap
@@ -28,8 +28,10 @@ import io.netty.channel.socket.SocketChannel
 import io.netty.channel.socket.nio.NioServerSocketChannel
 import io.netty.handler.codec.LengthFieldBasedFrameDecoder
 import io.netty.handler.codec.bytes.{ByteArrayDecoder, ByteArrayEncoder}
+import io.netty.handler.timeout.ReadTimeoutHandler
 
-import org.apache.spark.Logging
+import org.apache.spark.SparkConf
+import org.apache.spark.internal.Logging
 
 /**
  * Netty-based backend server that is used to communicate between R and Java.
@@ -40,15 +42,22 @@ private[spark] class RBackend {
   private[this] var bootstrap: ServerBootstrap = null
   private[this] var bossGroup: EventLoopGroup = null
 
+  /** Tracks JVM objects returned to R for this RBackend instance. */
+  private[r] val jvmObjectTracker = new JVMObjectTracker
+
   def init(): Int = {
-    bossGroup = new NioEventLoopGroup(2)
+    val conf = new SparkConf()
+    val backendConnectionTimeout = conf.getInt(
+      "spark.r.backendConnectionTimeout", SparkRDefaults.DEFAULT_CONNECTION_TIMEOUT)
+    bossGroup = new NioEventLoopGroup(
+      conf.getInt("spark.r.numRBackendThreads", SparkRDefaults.DEFAULT_NUM_RBACKEND_THREADS))
     val workerGroup = bossGroup
     val handler = new RBackendHandler(this)
-  
+
     bootstrap = new ServerBootstrap()
       .group(bossGroup, workerGroup)
       .channel(classOf[NioServerSocketChannel])
-  
+
     bootstrap.childHandler(new ChannelInitializer[SocketChannel]() {
       def initChannel(ch: SocketChannel): Unit = {
         ch.pipeline()
@@ -61,11 +70,12 @@ private[spark] class RBackend {
             // initialBytesToStrip = 4, i.e. strip out the length field itself
             new LengthFieldBasedFrameDecoder(Integer.MAX_VALUE, 0, 4, 0, 4))
           .addLast("decoder", new ByteArrayDecoder())
+          .addLast("readTimeoutHandler", new ReadTimeoutHandler(backendConnectionTimeout))
           .addLast("handler", handler)
       }
     })
 
-    channelFuture = bootstrap.bind(new InetSocketAddress(0))
+    channelFuture = bootstrap.bind(new InetSocketAddress("localhost", 0))
     channelFuture.syncUninterruptibly()
     channelFuture.channel().localAddress().asInstanceOf[InetSocketAddress].getPort()
   }
@@ -87,22 +97,33 @@ private[spark] class RBackend {
       bootstrap.childGroup().shutdownGracefully()
     }
     bootstrap = null
+    jvmObjectTracker.clear()
   }
 
 }
 
 private[spark] object RBackend extends Logging {
+  initializeLogIfNecessary(true)
+
   def main(args: Array[String]): Unit = {
     if (args.length < 1) {
+      // scalastyle:off println
       System.err.println("Usage: RBackend <tempFilePath>")
+      // scalastyle:on println
       System.exit(-1)
     }
+
     val sparkRBackend = new RBackend()
     try {
       // bind to random port
       val boundPort = sparkRBackend.init()
-      val serverSocket = new ServerSocket(0, 1)
+      val serverSocket = new ServerSocket(0, 1, InetAddress.getByName("localhost"))
       val listenPort = serverSocket.getLocalPort()
+      // Connection timeout is set by socket client. To make it configurable we will pass the
+      // timeout value to client inside the temp file
+      val conf = new SparkConf()
+      val backendConnectionTimeout = conf.getInt(
+        "spark.r.backendConnectionTimeout", SparkRDefaults.DEFAULT_CONNECTION_TIMEOUT)
 
       // tell the R process via temporary file
       val path = args(0)
@@ -110,6 +131,8 @@ private[spark] object RBackend extends Logging {
       val dos = new DataOutputStream(new FileOutputStream(f))
       dos.writeInt(boundPort)
       dos.writeInt(listenPort)
+      SerDe.writeString(dos, RUtils.rPackages.getOrElse(""))
+      dos.writeInt(backendConnectionTimeout)
       dos.close()
       f.renameTo(new File(path))
 

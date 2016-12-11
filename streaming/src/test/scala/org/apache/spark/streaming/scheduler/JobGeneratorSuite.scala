@@ -76,7 +76,6 @@ class JobGeneratorSuite extends TestSuiteBase {
         if (time.milliseconds == longBatchTime) {
           while (waitLatch.getCount() > 0) {
             waitLatch.await()
-            println("Await over")
           }
         }
       })
@@ -124,6 +123,7 @@ class JobGeneratorSuite extends TestSuiteBase {
       assert(getBlocksOfBatch(longBatchTime).nonEmpty, "blocks of incomplete batch already deleted")
       assert(batchCounter.getNumCompletedBatches < longBatchNumber)
       waitLatch.countDown()
+      ssc.stop()
     }
   }
 }

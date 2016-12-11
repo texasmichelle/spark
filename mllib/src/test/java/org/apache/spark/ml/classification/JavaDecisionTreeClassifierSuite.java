@@ -17,38 +17,19 @@
 
 package org.apache.spark.ml.classification;
 
-import java.io.File;
-import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
 
+import org.apache.spark.SharedSparkSession;
 import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.api.java.JavaSparkContext;
-import org.apache.spark.ml.impl.TreeTests;
-import org.apache.spark.mllib.classification.LogisticRegressionSuite;
-import org.apache.spark.mllib.regression.LabeledPoint;
-import org.apache.spark.sql.DataFrame;
-import org.apache.spark.util.Utils;
+import org.apache.spark.ml.feature.LabeledPoint;
+import org.apache.spark.ml.tree.impl.TreeTests;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
 
-
-public class JavaDecisionTreeClassifierSuite implements Serializable {
-
-  private transient JavaSparkContext sc;
-
-  @Before
-  public void setUp() {
-    sc = new JavaSparkContext("local", "JavaDecisionTreeClassifierSuite");
-  }
-
-  @After
-  public void tearDown() {
-    sc.stop();
-    sc = null;
-  }
+public class JavaDecisionTreeClassifierSuite extends SharedSparkSession {
 
   @Test
   public void runDT() {
@@ -56,10 +37,10 @@ public class JavaDecisionTreeClassifierSuite implements Serializable {
     double A = 2.0;
     double B = -1.5;
 
-    JavaRDD<LabeledPoint> data = sc.parallelize(
-        LogisticRegressionSuite.generateLogisticInputAsList(A, B, nPoints, 42), 2).cache();
-    Map<Integer, Integer> categoricalFeatures = new HashMap<Integer, Integer>();
-    DataFrame dataFrame = TreeTests.setMetadata(data, categoricalFeatures, 2);
+    JavaRDD<LabeledPoint> data = jsc.parallelize(
+      LogisticRegressionSuite.generateLogisticInputAsList(A, B, nPoints, 42), 2).cache();
+    Map<Integer, Integer> categoricalFeatures = new HashMap<>();
+    Dataset<Row> dataFrame = TreeTests.setMetadata(data, categoricalFeatures, 2);
 
     // This tests setters. Training with various options is tested in Scala.
     DecisionTreeClassifier dt = new DecisionTreeClassifier()
@@ -71,8 +52,8 @@ public class JavaDecisionTreeClassifierSuite implements Serializable {
       .setCacheNodeIds(false)
       .setCheckpointInterval(10)
       .setMaxDepth(2); // duplicate setMaxDepth to check builder pattern
-    for (int i = 0; i < DecisionTreeClassifier.supportedImpurities().length; ++i) {
-      dt.setImpurity(DecisionTreeClassifier.supportedImpurities()[i]);
+    for (String impurity : DecisionTreeClassifier.supportedImpurities()) {
+      dt.setImpurity(impurity);
     }
     DecisionTreeClassificationModel model = dt.fit(dataFrame);
 
@@ -82,7 +63,7 @@ public class JavaDecisionTreeClassifierSuite implements Serializable {
     model.toDebugString();
 
     /*
-    // TODO: Add test once save/load are implemented.
+    // TODO: Add test once save/load are implemented.  SPARK-6725
     File tempDir = Utils.createTempDir(System.getProperty("java.io.tmpdir"), "spark");
     String path = tempDir.toURI().toString();
     try {
